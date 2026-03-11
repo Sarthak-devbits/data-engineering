@@ -1,0 +1,665 @@
+// Prisma Schema for Xero Data Engineering Pipeline
+// Database: PostgreSQL
+// All tables are multi-tenant scoped by userId
+// updatedDateUtc is used for smart upsert (only update if data changed in Xero)
+
+generator client {
+    provider = "prisma-client-js"
+}
+
+datasource db {
+    provider = "postgresql"
+}
+
+// ─────────────────────────────────────────────
+// ACCOUNTS (Chart of Accounts)
+// Xero API: GET /Accounts
+// ─────────────────────────────────────────────
+model Account {
+    id                      String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+    accountId               String    @unique // Xero AccountID
+    userId                  Int
+    xeroUserId              String
+    code                    String?
+    name                    String
+    description             String?
+    accountClass            String?
+    accountType             String?
+    taxType                 String?
+    enablePaymentsToAccount Boolean   @default(false)
+    showInExpenseClaims     Boolean   @default(false)
+    status                  String?
+    updatedDateUtc          DateTime?
+    createdAt               DateTime  @default(now())
+    updatedAt               DateTime  @updatedAt
+
+    // Relations (one account can appear in many places)
+    journalLines  JournalLine[]
+    balanceSheets BalanceSheet[]
+    profitAndLoss ProfitAndLoss[]
+    trialBalances TrialBalance[]
+
+    @@unique([accountId, userId])
+    @@index([userId])
+    @@index([xeroUserId])
+    @@map("accounts")
+}
+
+// ─────────────────────────────────────────────
+// CONTACTS (Customers & Suppliers)
+// Xero API: GET /Contacts
+// ─────────────────────────────────────────────
+model Contact {
+    id             String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+    contactId      String    @unique // Xero ContactID
+    userId         Int
+    xeroUserId     String
+    name           String
+    emailAddress   String?
+    companyNumber  String?
+    isSupplier     Boolean   @default(false)
+    isCustomer     Boolean   @default(false)
+    address        String? // Concatenated address string
+    phone          String? // Concatenated phone string
+    taxNumber      String?
+    accountNumber  String?
+    updatedDateUtc DateTime?
+    createdAt      DateTime  @default(now())
+    updatedAt      DateTime  @updatedAt
+
+    // Relations
+    agedPayables    AgedPayableByContact[]
+    agedReceivables AgedReceivableByContact[]
+
+    @@unique([contactId, userId])
+    @@index([userId])
+    @@index([name])
+    @@map("contacts")
+}
+
+// ─────────────────────────────────────────────
+// INVOICES (Sales & Purchase Invoices)
+// Xero API: GET /Invoices?page={n}   (paginated)
+// ─────────────────────────────────────────────
+model Invoice {
+    id              String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+    compositeId     String    @unique // invoiceId + userId
+    invoiceId       String // Xero InvoiceID
+    userId          Int
+    xeroUserId      String
+    type            String? // ACCPAY | ACCREC
+    contactName     String?
+    invoiceNumber   String?
+    reference       String?
+    status          String?
+    date            DateTime?
+    dueDate         DateTime?
+    fullyPaidOnDate DateTime?
+    subTotal        Decimal   @default(0) @db.Decimal(18, 4)
+    totalTax        Decimal   @default(0) @db.Decimal(18, 4)
+    total           Decimal   @default(0) @db.Decimal(18, 4)
+    amountDue       Decimal   @default(0) @db.Decimal(18, 4)
+    amountPaid      Decimal   @default(0) @db.Decimal(18, 4)
+    // First line item (denormalized for query convenience)
+    description     String?
+    quantity        Decimal?  @db.Decimal(18, 4)
+    unitAmount      Decimal?  @db.Decimal(18, 4)
+    currencyCode    String?
+    updatedDateUtc  DateTime?
+    createdAt       DateTime  @default(now())
+    updatedAt       DateTime  @updatedAt
+
+    // Relations
+    attachments Attachment[]
+    journals    Journal[]
+
+    @@index([invoiceId, userId])
+    @@index([userId])
+    @@index([status])
+    @@index([date])
+    @@map("invoices")
+}
+
+// ─────────────────────────────────────────────
+// CREDIT NOTES
+// Xero API: GET /CreditNotes?page={n}  (paginated)
+// ─────────────────────────────────────────────
+model CreditNote {
+    id               String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+    compositeId      String    @unique // creditNoteId + userId
+    creditNoteId     String // Xero CreditNoteID
+    userId           Int
+    xeroUserId       String
+    type             String? // ACCPAYCREDIT | ACCRECCREDIT
+    creditNoteNumber String?
+    contactName      String?
+    status           String?
+    date             DateTime?
+    dueDate          DateTime? // FullyPaidOnDate in Xero
+    subTotal         Decimal   @default(0) @db.Decimal(18, 4)
+    totalTax         Decimal   @default(0) @db.Decimal(18, 4)
+    total            Decimal   @default(0) @db.Decimal(18, 4)
+    lineItems        Json?     @db.JsonB // Full line items JSON
+    description      String?
+    quantity         Decimal?  @db.Decimal(18, 4)
+    unitAmount       Decimal?  @db.Decimal(18, 4)
+    updatedDateUtc   DateTime?
+    createdAt        DateTime  @default(now())
+    updatedAt        DateTime  @updatedAt
+
+    attachments Attachment[]
+    journals    Journal[]
+
+    @@index([creditNoteId, userId])
+    @@index([userId])
+    @@map("credit_notes")
+}
+
+// ─────────────────────────────────────────────
+// PAYMENTS
+// Xero API: GET /Payments
+// ─────────────────────────────────────────────
+model Payment {
+    id             String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+    compositeId    String    @unique // paymentId + userId
+    paymentId      String // Xero PaymentID
+    userId         Int
+    xeroUserId     String
+    invoiceNumber  String?
+    invoice        Json?     @db.JsonB
+    account        Json?     @db.JsonB
+    date           DateTime?
+    amount         Decimal   @default(0) @db.Decimal(18, 4)
+    paymentType    String?
+    reference      String?
+    updatedDateUtc DateTime?
+    createdAt      DateTime  @default(now())
+    updatedAt      DateTime  @updatedAt
+
+    journals Journal[]
+
+    @@index([paymentId, userId])
+    @@index([userId])
+    @@map("payments")
+}
+
+// ─────────────────────────────────────────────
+// BANK TRANSACTIONS
+// Xero API: GET /BankTransactions
+// ─────────────────────────────────────────────
+model BankTransaction {
+    id                String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+    compositeId       String    @unique // bankTransactionId + userId
+    bankTransactionId String // Xero BankTransactionID
+    userId            Int
+    xeroUserId        String
+    type              String?
+    contactName       String?
+    bankAccount       Json?     @db.JsonB
+    date              DateTime?
+    reference         String?
+    subTotal          Decimal   @default(0) @db.Decimal(18, 4)
+    totalTax          Decimal   @default(0) @db.Decimal(18, 4)
+    total             Decimal   @default(0) @db.Decimal(18, 4)
+    lineItems         Json?     @db.JsonB
+    isReconciled      Boolean   @default(false)
+    currencyCode      String?
+    updatedDateUtc    DateTime?
+    createdAt         DateTime  @default(now())
+    updatedAt         DateTime  @updatedAt
+
+    attachments Attachment[]
+    journals    Journal[]
+
+    @@index([bankTransactionId, userId])
+    @@index([userId])
+    @@map("bank_transactions")
+}
+
+// ─────────────────────────────────────────────
+// EXPENSE CLAIMS
+// Xero API: GET /ExpenseClaims
+// ─────────────────────────────────────────────
+model ExpenseClaim {
+    id             String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+    expenseClaimId String // Xero ExpenseClaimID
+    userId         Int
+    xeroUserId     String
+    status         String?
+    user           Json?     @db.JsonB // Xero User object
+    total          Decimal   @default(0) @db.Decimal(18, 4)
+    amountDue      Decimal   @default(0) @db.Decimal(18, 4)
+    amountPaid     Decimal   @default(0) @db.Decimal(18, 4)
+    paymentDueDate DateTime?
+    reportingDate  DateTime?
+    updatedDateUtc DateTime?
+    createdAt      DateTime  @default(now())
+    updatedAt      DateTime  @updatedAt
+
+    @@unique([expenseClaimId, userId])
+    @@index([userId])
+    @@map("expense_claims")
+}
+
+// ─────────────────────────────────────────────
+// EMPLOYEES
+// Xero API: GET /Employee
+// ─────────────────────────────────────────────
+model Employee {
+    id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+    employeeId String // Xero EmployeeID
+    userId     Int
+    xeroUserId String
+    status     String?
+    firstName  String?
+    lastName   String?
+    createdAt  DateTime @default(now())
+    updatedAt  DateTime @updatedAt
+
+    @@unique([employeeId, userId])
+    @@index([userId])
+    @@map("employees")
+}
+
+// ─────────────────────────────────────────────
+// ITEMS (Products / Inventory)
+// Xero API: GET /Items
+// ─────────────────────────────────────────────
+model Item {
+    id                        String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+    itemId                    String // Xero ItemID
+    userId                    Int
+    xeroUserId                String
+    code                      String?
+    name                      String?
+    description               String?
+    inventoryAssetAccountCode String?
+    purchaseDetails           Json?     @db.JsonB
+    unitPrice                 Decimal?  @db.Decimal(18, 4)
+    totalCostPool             Decimal?  @db.Decimal(18, 4)
+    quantityOnHand            Decimal?  @db.Decimal(18, 4)
+    isTrackedAsInventory      Boolean   @default(false)
+    updatedDateUtc            DateTime?
+    createdAt                 DateTime  @default(now())
+    updatedAt                 DateTime  @updatedAt
+
+    @@unique([itemId, userId])
+    @@index([userId])
+    @@map("items")
+}
+
+// ─────────────────────────────────────────────
+// PURCHASE ORDERS
+// Xero API: GET /PurchaseOrders
+// ─────────────────────────────────────────────
+model PurchaseOrder {
+    id                   String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+    purchaseOrderId      String // Xero PurchaseOrderID
+    userId               Int
+    xeroUserId           String
+    purchaseOrderNumber  String?
+    contactName          String?
+    reference            String?
+    status               String?
+    date                 DateTime?
+    deliveryDate         DateTime?
+    expectedArrivalDate  DateTime?
+    deliveryAddresses    String?
+    deliveryInstructions String?
+    telephone            String?
+    lineItems            Json?     @db.JsonB
+    subTotal             Decimal   @default(0) @db.Decimal(18, 4)
+    totalTax             Decimal   @default(0) @db.Decimal(18, 4)
+    total                Decimal   @default(0) @db.Decimal(18, 4)
+    currencyCode         String?
+    updatedDateUtc       DateTime?
+    createdAt            DateTime  @default(now())
+    updatedAt            DateTime  @updatedAt
+
+    attachments Attachment[]
+
+    @@unique([purchaseOrderId, userId])
+    @@index([userId])
+    @@map("purchase_orders")
+}
+
+// ─────────────────────────────────────────────
+// RECEIPTS
+// Xero API: GET /Receipts
+// ─────────────────────────────────────────────
+model Receipt {
+    id             String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+    receiptId      String // Xero ReceiptID
+    userId         Int
+    xeroUserId     String
+    date           DateTime?
+    contact        Json?     @db.JsonB
+    user           Json?     @db.JsonB
+    lineItems      Json?     @db.JsonB
+    subTotal       Decimal   @default(0) @db.Decimal(18, 4)
+    totalTax       Decimal   @default(0) @db.Decimal(18, 4)
+    total          Decimal   @default(0) @db.Decimal(18, 4)
+    status         String?
+    receiptNumber  String?
+    updatedDateUtc DateTime?
+    createdAt      DateTime  @default(now())
+    updatedAt      DateTime  @updatedAt
+
+    attachments Attachment[]
+
+    @@unique([receiptId, userId])
+    @@index([userId])
+    @@map("receipts")
+}
+
+// ─────────────────────────────────────────────
+// QUOTES
+// Xero API: GET /Quotes
+// ─────────────────────────────────────────────
+model Quote {
+    id             String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+    quoteId        String // Xero QuoteID
+    userId         Int
+    xeroUserId     String
+    quoteNumber    String?
+    contactName    String? // provider name
+    status         String?
+    date           DateTime?
+    expiryDate     DateTime?
+    subTotal       Decimal?  @db.Decimal(18, 4)
+    totalTax       Decimal?  @db.Decimal(18, 4)
+    total          Decimal?  @db.Decimal(18, 4)
+    quoteData      Json?     @db.JsonB // Full quote JSON blob
+    updatedDateUtc DateTime?
+    createdAt      DateTime  @default(now())
+    updatedAt      DateTime  @updatedAt
+
+    @@unique([quoteId, userId])
+    @@index([userId])
+    @@map("quotes")
+}
+
+// ─────────────────────────────────────────────
+// ATTACHMENTS
+// Xero API: GET /{Entity}/{id}/Attachments
+// ─────────────────────────────────────────────
+model Attachment {
+    id                String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+    attachmentId      String   @unique // Xero AttachmentID
+    xeroUserId        String
+    fileName          String?
+    url               String?
+    mimeType          String?
+    contentLength     Int?
+    // Polymorphic entity relations (only one will be set)
+    invoiceId         String?  @db.Uuid
+    creditNoteId      String?  @db.Uuid
+    bankTransactionId String?  @db.Uuid
+    purchaseOrderId   String?  @db.Uuid
+    receiptId         String?  @db.Uuid
+    entityType        String? // "Invoices", "CreditNotes", etc.
+    entityXeroId      String? // Xero GUID of the parent entity
+    createdAt         DateTime @default(now())
+    updatedAt         DateTime @updatedAt
+
+    invoice         Invoice?         @relation(fields: [invoiceId], references: [id])
+    creditNote      CreditNote?      @relation(fields: [creditNoteId], references: [id])
+    bankTransaction BankTransaction? @relation(fields: [bankTransactionId], references: [id])
+    purchaseOrder   PurchaseOrder?   @relation(fields: [purchaseOrderId], references: [id])
+    receipt         Receipt?         @relation(fields: [receiptId], references: [id])
+
+    @@index([xeroUserId])
+    @@index([entityType, entityXeroId])
+    @@map("attachments")
+}
+
+// ─────────────────────────────────────────────
+// JOURNALS (General Ledger)
+// Xero API: GET /Journals?offset={n}
+// ─────────────────────────────────────────────
+model Journal {
+    id                         String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+    journalId                  String // Xero JournalID
+    userId                     Int
+    xeroUserId                 String
+    journalNumber              Int
+    journalDate                DateTime?
+    createdDateUtc             DateTime?
+    reference                  String?
+    sourceId                   String?
+    sourceType                 String?
+    contactName                String? // Extracted from context or OpenAI
+    // FK references to source documents (composite IDs)
+    bankTransactionCompositeId String?
+    paymentCompositeId         String?
+    creditNoteCompositeId      String?
+    invoiceCompositeId         String?
+    createdAt                  DateTime  @default(now())
+    updatedAt                  DateTime  @updatedAt
+
+    expenseClaimId String? // Xero ExpenseClaimID (no FK — stored as plain string reference)
+
+    // Relations
+    lines           JournalLine[]
+    invoice         Invoice?         @relation(fields: [invoiceCompositeId], references: [compositeId])
+    creditNote      CreditNote?      @relation(fields: [creditNoteCompositeId], references: [compositeId])
+    bankTransaction BankTransaction? @relation(fields: [bankTransactionCompositeId], references: [compositeId])
+    payment         Payment?         @relation(fields: [paymentCompositeId], references: [compositeId])
+
+    @@unique([journalId, userId, journalNumber, journalDate])
+    @@index([userId])
+    @@index([journalDate])
+    @@index([sourceType])
+    @@map("journals")
+}
+
+// ─────────────────────────────────────────────
+// JOURNAL LINES
+// Child rows of Journals (one journal has many lines)
+// ─────────────────────────────────────────────
+model JournalLine {
+    id            String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+    journalLineId String // Xero JournalLineID
+    journalId     String   @db.Uuid
+    accountId     String?
+    accountCode   String?
+    accountType   String?
+    accountName   String?
+    description   String?
+    netAmount     Decimal  @default(0) @db.Decimal(18, 4)
+    grossAmount   Decimal  @default(0) @db.Decimal(18, 4)
+    taxAmount     Decimal  @default(0) @db.Decimal(18, 4)
+    taxType       String?
+    taxName       String?
+    createdAt     DateTime @default(now())
+
+    journal Journal  @relation(fields: [journalId], references: [id], onDelete: Cascade)
+    account Account? @relation(fields: [accountId], references: [accountId], map: "journal_line_account_fk")
+
+    @@index([journalId])
+    @@index([accountId])
+    @@map("journal_lines")
+}
+
+// ─────────────────────────────────────────────
+// BUDGETS
+// Xero API: GET /Budgets
+// ─────────────────────────────────────────────
+model Budget {
+    id             String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+    compositeId    String    @unique // budgetId + userId
+    budgetId       String // Xero BudgetID
+    userId         Int
+    xeroUserId     String
+    budgetType     String?
+    description    String?
+    budgetLines    Json?     @db.JsonB
+    tracking       Json?     @db.JsonB
+    updatedDateUtc DateTime?
+    createdAt      DateTime  @default(now())
+    updatedAt      DateTime  @updatedAt
+
+    @@index([budgetId, userId])
+    @@index([userId])
+    @@map("budgets")
+}
+
+// ─────────────────────────────────────────────
+// BALANCE SHEET
+// Xero API: GET /Reports/BalanceSheet?date={date}
+// Pulls last 12 months of data
+// ─────────────────────────────────────────────
+model BalanceSheet {
+    id             String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+    userId         Int
+    accountId      String? // Xero Account ID
+    accountType    String // Row label (e.g. "Cash and Cash Equivalents")
+    date           String // Period end date string (YYYY-MM-DD)
+    value          String? // String as Xero returns formatted numbers
+    updatedDateUtc DateTime?
+    createdAt      DateTime  @default(now())
+    updatedAt      DateTime  @updatedAt
+
+    account Account? @relation(fields: [accountId], references: [accountId], map: "balance_sheet_account_fk")
+
+    @@unique([accountType, date, userId])
+    @@index([userId])
+    @@index([date])
+    @@map("balance_sheet")
+}
+
+// ─────────────────────────────────────────────
+// PROFIT AND LOSS (Historical, month by month)
+// Xero API: GET /Reports/ProfitAndLoss?fromDate=...&toDate=...
+// ─────────────────────────────────────────────
+model ProfitAndLoss {
+    id             String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+    userId         Int
+    reportId       String?
+    type           String // Row label (account type/name)
+    value          String?
+    accountId      String?
+    reportTitle    String?
+    organisation   String?
+    reportDates    String // Period description (e.g. "1 Jan - 31 Jan 2024")
+    updatedDateUtc DateTime?
+    createdAt      DateTime  @default(now())
+    updatedAt      DateTime  @updatedAt
+
+    account Account? @relation(fields: [accountId], references: [accountId], map: "profit_loss_account_fk")
+
+    @@unique([type, reportDates, userId])
+    @@index([userId])
+    @@index([reportDates])
+    @@map("profit_and_loss")
+}
+
+// ─────────────────────────────────────────────
+// TRIAL BALANCE (Monthly snapshots)
+// Xero API: GET /Reports/TrialBalance
+// ─────────────────────────────────────────────
+model TrialBalance {
+    id             String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+    userId         Int
+    accountId      String? // Xero Account ID
+    accountName    String?
+    accountCode    String?
+    debit          String?
+    credit         String?
+    ytdDebit       String?
+    ytdCredit      String?
+    reportDate     String? // Date the report snapshot was taken
+    updatedDateUtc DateTime?
+    createdAt      DateTime  @default(now())
+    updatedAt      DateTime  @updatedAt
+
+    account Account? @relation(fields: [accountId], references: [accountId], map: "trial_balance_account_fk")
+
+    @@unique([accountId, userId])
+    @@index([userId])
+    @@map("trial_balance")
+}
+
+// ─────────────────────────────────────────────
+// BUDGET SUMMARY
+// Xero API: GET /Reports/BudgetSummary?date={year}-01-01
+// ─────────────────────────────────────────────
+model BudgetSummary {
+    id             String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+    userId         Int
+    account        String // Row label (account name)
+    date           String // Period column header
+    value          String?
+    updatedDateUtc DateTime?
+    createdAt      DateTime  @default(now())
+    updatedAt      DateTime  @updatedAt
+
+    @@unique([account, date, userId])
+    @@index([userId])
+    @@map("budget_summary")
+}
+
+// ─────────────────────────────────────────────
+// AGED PAYABLES BY CONTACT
+// Xero API: GET /Contacts then GET /Reports/AgedPayablesByContact?ContactID=...
+// ─────────────────────────────────────────────
+model AgedPayableByContact {
+    id              String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+    userId          Int
+    contactId       String // Xero ContactID
+    invoiceId       String? // Xero InvoiceID (from Attributes)
+    date            String?
+    reference       String?
+    dueDate         String?
+    total           String?
+    paid            String?
+    credited        String?
+    due             String?
+    type            String?
+    name            String? // Contact name
+    reportTitleDate String?
+    description     String?
+    updatedDateUtc  DateTime?
+    createdAt       DateTime  @default(now())
+    updatedAt       DateTime  @updatedAt
+
+    contact Contact @relation(fields: [contactId], references: [contactId], map: "aged_payable_contact_fk")
+
+    @@unique([dueDate, userId, name, contactId, invoiceId])
+    @@index([userId])
+    @@index([contactId])
+    @@map("aged_payables_by_contact")
+}
+
+// ─────────────────────────────────────────────
+// AGED RECEIVABLES BY CONTACT
+// Xero API: GET /Contacts then GET /Reports/AgedReceivablesByContact?ContactID=...
+// ─────────────────────────────────────────────
+model AgedReceivableByContact {
+    id              String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+    userId          Int
+    contactId       String // Xero ContactID
+    invoiceId       String? // Xero InvoiceID from Attributes
+    number          String? // Invoice number
+    date            String?
+    dueDate         String?
+    overdue         String?
+    total           String?
+    paid            String?
+    credited        String?
+    due             String?
+    type            String?
+    name            String?
+    reportTitleDate String?
+    description     String?
+    updatedDateUtc  DateTime?
+    createdAt       DateTime  @default(now())
+    updatedAt       DateTime  @updatedAt
+
+    contact Contact @relation(fields: [contactId], references: [contactId], map: "aged_receivable_contact_fk")
+
+    @@unique([number, invoiceId])
+    @@index([userId])
+    @@index([contactId])
+    @@map("aged_receivables_by_contact")
+}
